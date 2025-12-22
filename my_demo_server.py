@@ -1,73 +1,97 @@
 from mcp.server.fastmcp import FastMCP
+import sqlite3
+import psutil
 import json
 
-# Initialize Server
-mcp = FastMCP("Enterprise Demo System")
-
-# --- MOCK DATABASE (Simulation) ---
-# In a real scenario, this would be a SQL Database or an external CRM API.
-employee_db = {
-    "emp_101": {
-        "name": "Alice Johnson",
-        "role": "Senior Developer",
-        "department": "Engineering",
-        "last_login": "2024-12-08 09:15:00",
-        "access_level": "Admin"
-    },
-    "emp_102": {
-        "name": "Bob Smith",
-        "role": "Marketing Specialist",
-        "department": "Marketing",
-        "last_login": "2024-12-07 14:30:00",
-        "access_level": "User"
-    }
-}
-
-# --- PART 1: RESOURCES ---
-
-@mcp.resource("memodb://employees/{user_id}")
-def get_employee_profile(user_id: str) -> str:
-    """
-    Retrieves the full profile of an employee by their ID.
-    Returns JSON formatted string for the model to parse.
-    """
-    user_data = employee_db.get(user_id)
+# Initialize Database (Mock Enterprise DB)
+def initialize_database():
+    conn = sqlite3.connect('company.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS employees 
+                 (id TEXT PRIMARY KEY, name TEXT, role TEXT, salary REAL, performance INTEGER)''')
     
-    if user_data:
-        return json.dumps(user_data, indent=2)
-    else:
-        return "Error: Employee not found in the database."
+    # Seed data
+    c.execute("INSERT OR IGNORE INTO employees VALUES ('emp_101', 'Alice Johnson', 'Senior Dev', 90000, 5)")
+    c.execute("INSERT OR IGNORE INTO employees VALUES ('emp_102', 'Bob Smith', 'Marketing Lead', 65000, 3)")
+    c.execute("INSERT OR IGNORE INTO employees VALUES ('emp_103', 'Charlie Davis', 'Intern', 30000, 4)")
+    
+    conn.commit()
+    conn.close()
 
-# --- PART 2: TOOLS ---
+initialize_database()
 
-@mcp.tool()
-def calculate_bonus(salary: float, performance_score: int) -> float:
-    """Calculates yearly bonus based on performance (1-5)."""
-    if performance_score >= 5:
-        return salary * 0.20
-    elif performance_score >= 3:
-        return salary * 0.10
-    return 0.0
+mcp = FastMCP("Enterprise Omni-System")
 
-@mcp.tool()
-def reset_password(user_id: str) -> str:
-    """Resets the password for a specific user and generates a temporary one."""
-    if user_id in employee_db:
-        # Simulation of a password reset logic
-        return f"SUCCESS: Password for {employee_db[user_id]['name']} has been reset. Temp pass: Xy9#mP2!"
-    return "FAILED: User ID not found."
+# --- RESOURCES ---
 
-# --- PART 3: PROMPTS ---
-
-@mcp.prompt()
-def create_onboarding_plan(user_id: str) -> str:
-    """Generates an onboarding checklist for a new employee based on their ID."""
+@mcp.resource("system://logs/latest")
+def get_system_logs() -> str:
+    """Returns the latest system health metrics (CPU, RAM)."""
+    cpu_usage = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
     return f"""
-    Please create an Onboarding Plan for the employee with ID: {user_id}.
-    
-    First, READ the employee's profile using the 'memodb://employees/{user_id}' resource.
-    Then, based on their 'role' and 'department', generate a Day 1 checklist.
+    --- SYSTEM HEALTH REPORT ---
+    CPU Usage: {cpu_usage}%
+    RAM Usage: {memory.percent}%
+    Available RAM: {memory.available / (1024**3):.2f} GB
+    Status: {'CRITICAL' if cpu_usage > 80 else 'NOMINAL'}
     """
+
+@mcp.resource("biz://policy/bonus")
+def get_bonus_policy() -> str:
+    """Returns the official company bonus policy text."""
+    return """
+    COMPANY BONUS POLICY (2025):
+    1. Performance Score 5: 20% of annual salary.
+    2. Performance Score 3-4: 10% of annual salary.
+    3. Performance Score < 3: No bonus.
+    4. Engineering roles receive an additional 5% tech allowance.
+    """
+
+# --- TOOLS ---
+
+@mcp.tool()
+def query_employee(query_sql: str) -> str:
+    """
+    Executes a SQL query on the 'employees' table. 
+    Columns: id, name, role, salary, performance.
+    """
+    try:
+        conn = sqlite3.connect('company.db')
+        c = conn.cursor()
+        c.execute(query_sql)
+        results = c.fetchall()
+        conn.close()
+        return json.dumps(results)
+    except Exception as e:
+        return f"SQL Error: {str(e)}"
+
+@mcp.tool()
+def calculate_bonus(salary: float, performance_score: int) -> str:
+    """Calculates the exact bonus amount based on salary and performance score (1-5)."""
+    if performance_score >= 5:
+        bonus = salary * 0.20
+    elif performance_score >= 3:
+        bonus = salary * 0.10
+    else:
+        bonus = 0.0
+    return f"Calculated Bonus: ${bonus}"
+# ---------------------------------------
+
+@mcp.tool()
+def analyze_server_health() -> str:
+    """Analyzes current server telemetry and returns a summary report."""
+    cpu = psutil.cpu_percent()
+    ram = psutil.virtual_memory().percent
+    
+    analysis = "ANALYSIS RESULT:\n"
+    if cpu > 50:
+        analysis += "⚠️ WARNING: High CPU load detected! Optimization recommended.\n"
+    else:
+        analysis += "✅ CPU status is stable.\n"
+        
+    analysis += f"📊 Current Load -> CPU: {cpu}%, RAM: {ram}%"
+    return analysis
 
 if __name__ == "__main__":
     mcp.run()

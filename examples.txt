@@ -1,0 +1,4 @@
+"List all employees who have a performance score higher than 3."
+"Calculate the bonus amount for Alice Johnson based on her salary and performance."
+"Check the current server health and CPU usage."
+"Read and display the full text of the company bonus policy."

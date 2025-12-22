@@ -2,98 +2,132 @@ import asyncio
 import ollama
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.table import Table
 
-# --- AYARLAR ---
+# Configuration
 MCP_SERVER_SCRIPT = "my_demo_server.py"  
 MODEL_NAME = "llama3.2"                
 
+console = Console()
+
+def display_header():
+    console.print(Panel.fit(
+        "[bold cyan]MCP ENTERPRISE CLIENT v2.0[/bold cyan]\n"
+        "[dim]Powered by Llama 3.2 & Model Context Protocol[/dim]",
+        border_style="blue"
+    ))
+
 async def run_chat_loop():
-    # 1. Sunucu Parametrelerini Ayarla
+    display_header()
+    
+    # We use "-u" for unbuffered output to prevent hanging
     server_params = StdioServerParameters(
         command="python", 
-        args=[MCP_SERVER_SCRIPT], 
+        args=["-u", MCP_SERVER_SCRIPT], 
         env=None
     )
 
-    print(f"🔌 MCP Sunucusuna Bağlanılıyor ({MCP_SERVER_SCRIPT})...")
-
-    # 2. Sunucuya Bağlan (Stdio üzerinden)
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             
-            # 3. Sunucudaki Tool'ları Listele
-            await session.initialize()
-            mcp_tools = await session.list_tools()
-            
-            # 4. MCP Tool formatını Ollama formatına çevir
-            # (Ollama JSON formatı bekler, MCP'den geleni dönüştürüyoruz)
-            ollama_tools = []
-            for tool in mcp_tools.tools:
-                ollama_tools.append({
-                    'type': 'function',
-                    'function': {
-                        'name': tool.name,
-                        'description': tool.description,
-                        'parameters': tool.inputSchema
-                    }
-                })
-            
-            print(f"🛠️  Yüklenen Tool Sayısı: {len(ollama_tools)}")
-            print("-" * 50)
-            print("🤖 Asistan Hazır! (Çıkmak için 'q' bas)")
+            # --- CONNECTION & INITIALIZATION ---
+            with console.status("[bold green]Connecting to MCP Server...", spinner="dots"):
+                await session.initialize()
+                mcp_tools = await session.list_tools()
+                
+                # Convert MCP tools to Ollama format
+                ollama_tools = []
+                for tool in mcp_tools.tools:
+                    ollama_tools.append({
+                        'type': 'function',
+                        'function': {
+                            'name': tool.name,
+                            'description': tool.description,
+                            'parameters': tool.inputSchema
+                        }
+                    })
+                
+                resources = await session.list_resources()
 
-            # --- SOHBET DÖNGÜSÜ ---
-            history = [] # Sohbet geçmişi
+            # --- DISPLAY RESOURCES ---
+            console.print(f"[bold green]✓ Connected successfully![/bold green] {len(ollama_tools)} tools loaded.")
+            
+            r_table = Table(title="Available Resources")
+            r_table.add_column("URI", style="cyan")
+            r_table.add_column("Description", style="magenta")
+            
+            for res in resources.resources:
+                r_table.add_row(str(res.uri), res.name or "No description")
+            
+            console.print(r_table)
+            
+            # --- CHAT LOOP ---
+            # System prompt to prevent over-triggering tools during small talk
+            history = [{
+                'role': 'system', 
+                'content': (
+                    "You are a helpful corporate assistant. "
+                    "If the user greets you (e.g., 'Hi', 'Hello'), reply naturally WITHOUT calling any tools. "
+                    "ONLY use tools when the user specifically asks for data about employees, salary, or system health. "
+                    "When writing SQL, ensure it is complete and valid."
+                )
+            }]
             
             while True:
-                user_input = input("\nSen: ")
+                user_input = console.input("\n[bold yellow]You > [/bold yellow]")
                 if user_input.lower() in ['q', 'exit']:
                     break
                 
-                # Kullanıcı mesajını geçmişe ekle
                 history.append({'role': 'user', 'content': user_input})
 
-                # 5. Ollama'ya Gönder (Tool'larla birlikte!)
-                response = ollama.chat(
-                    model=MODEL_NAME,
-                    messages=history,
-                    tools=ollama_tools, # ✨ SİHİR BURADA: Toolları modele veriyoruz
-                )
-
-                # 6. Model Tool Çağırmak İstiyor mu Kontrol Et
-                if response['message'].get('tool_calls'):
-                    print("\n⚡ MODEL TOOL ÇAĞIRMAYA KARAR VERDİ:")
+                # Spinner for AI processing
+                with console.status("[bold white]AI is thinking...", spinner="aesthetic") as status:
                     
-                    # Tool çağrısını geçmişe ekle (Modelin kafası karışmasın)
-                    history.append(response['message'])
+                    response = ollama.chat(
+                        model=MODEL_NAME,
+                        messages=history,
+                        tools=ollama_tools,
+                    )
 
-                    for tool_call in response['message']['tool_calls']:
-                        tool_name = tool_call['function']['name']
-                        tool_args = tool_call['function']['arguments']
+                    # Check if model wants to use a tool
+                    if response['message'].get('tool_calls'):
+                        status.update("[bold orange3]Executing Tool...", spinner="material")
                         
-                        print(f"   ➔ Çağrılan Tool: {tool_name}")
-                        print(f"   ➔ Argümanlar: {tool_args}")
+                        history.append(response['message'])
 
-                        # 7. Tool'u MCP Sunucusunda Çalıştır
-                        result = await session.call_tool(tool_name, tool_args)
+                        for tool_call in response['message']['tool_calls']:
+                            t_name = tool_call['function']['name']
+                            t_args = tool_call['function']['arguments']
+                            
+                            console.print(f"[dim]➔ Calling: {t_name}({t_args})[/dim]", style="italic")
+                            
+                            # Execute Tool via MCP
+                            result = await session.call_tool(t_name, t_args)
+                            tool_result_text = result.content[0].text
+                            
+                            console.print(Panel(tool_result_text, title=f"Output: {t_name}", border_style="green"))
+
+                            history.append({
+                                'role': 'tool',
+                                'content': tool_result_text,
+                            })
+
+                        # Get final response with tool data
+                        final_response = ollama.chat(model=MODEL_NAME, messages=history)
+                        ai_content = final_response['message']['content']
+                        history.append(final_response['message'])
                         
-                        print(f"   ➔ MCP Sonucu: {result.content[0].text}")
-
-                        # 8. Sonucu Ollama'ya Geri Gönder
-                        history.append({
-                            'role': 'tool',
-                            'content': result.content[0].text,
-                        })
-
-                    # Tool sonuçlarıyla birlikte modele tekrar sor (Final cevap için)
-                    final_response = ollama.chat(model=MODEL_NAME, messages=history)
-                    print(f"\n🤖 Asistan: {final_response['message']['content']}")
-                    history.append(final_response['message'])
-
-                else:
-                    # Tool çağırmadıysa normal cevap ver
-                    print(f"🤖 Asistan: {response['message']['content']}")
-                    history.append(response['message'])
+                    else:
+                        ai_content = response['message']['content']
+                        history.append(response['message'])
+                
+                console.print(Panel(Markdown(ai_content), title="Assistant", border_style="blue"))
 
 if __name__ == "__main__":
-    asyncio.run(run_chat_loop())
+    try:
+        asyncio.run(run_chat_loop())
+    except KeyboardInterrupt:
+        console.print("\n[bold red]System shutting down...[/bold red]")
